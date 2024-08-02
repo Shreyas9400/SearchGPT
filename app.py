@@ -521,6 +521,12 @@ demo = gr.ChatInterface(
     cache_examples=False,
     analytics_enabled=False,
     textbox=gr.Textbox(placeholder=custom_placeholder, container=False, scale=7),
+    chatbot = gr.Chatbot(  
+    show_copy_button=True,
+    likeable=True,
+    layout="bubble",
+    height=400,
+)
 )
 
 # Add file upload functionality
