@@ -343,13 +343,13 @@ def respond(message, history, model, temperature, num_calls, use_web_search, sel
                 # Use Cloudflare API
                 for partial_response in get_response_from_cloudflare(prompt="", context=context_str, query=message, num_calls=num_calls, temperature=temperature, search_type="pdf"):
                     first_line = partial_response.split('\n')[0] if partial_response else ''
-                    logging.info(f"Generated Response (first line): {first_line}")
+#                   logging.info(f"Generated Response (first line): {first_line}")
                     yield partial_response
             else:
                 # Use Hugging Face API
                 for partial_response in get_response_from_pdf(message, model, selected_docs, num_calls=num_calls, temperature=temperature):
                     first_line = partial_response.split('\n')[0] if partial_response else ''
-                    logging.info(f"Generated Response (first line): {first_line}")
+#                    logging.info(f"Generated Response (first line): {first_line}")
                     yield partial_response
     except Exception as e:
         logging.error(f"Error with {model}: {str(e)}")
