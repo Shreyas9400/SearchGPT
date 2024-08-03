@@ -15,6 +15,7 @@ from langchain_core.documents import Document
 from huggingface_hub import InferenceClient
 import inspect
 import logging
+import shutil
 
 
 # Set up basic configuration for logging
@@ -66,17 +67,30 @@ def load_document(file: NamedTemporaryFile, parser: str = "llamaparse") -> List[
 def get_embeddings():
     return HuggingFaceEmbeddings(model_name="sentence-transformers/stsb-roberta-large")
 
+# Add this at the beginning of your script, after imports
+DOCUMENTS_FILE = "uploaded_documents.json"
+
+def load_documents():
+    if os.path.exists(DOCUMENTS_FILE):
+        with open(DOCUMENTS_FILE, "r") as f:
+            return json.load(f)
+    return []
+
+def save_documents(documents):
+    with open(DOCUMENTS_FILE, "w") as f:
+        json.dump(documents, f)
+
+# Replace the global uploaded_documents with this
+uploaded_documents = load_documents()
+
+# Modify the update_vectors function
 def update_vectors(files, parser):
     global uploaded_documents
     logging.info(f"Entering update_vectors with {len(files)} files and parser: {parser}")
     
     if not files:
         logging.warning("No files provided for update_vectors")
-        return "Please upload at least one PDF file.", gr.CheckboxGroup(
-            choices=[doc["name"] for doc in uploaded_documents],
-            value=[doc["name"] for doc in uploaded_documents if doc["selected"]],
-            label="Select documents to query"
-        )
+        return "Please upload at least one PDF file.", display_documents()
     
     embed = get_embeddings()
     total_chunks = 0
@@ -86,10 +100,12 @@ def update_vectors(files, parser):
         logging.info(f"Processing file: {file.name}")
         try:
             data = load_document(file, parser)
+            if not data:
+                logging.warning(f"No chunks loaded from {file.name}")
+                continue
             logging.info(f"Loaded {len(data)} chunks from {file.name}")
             all_data.extend(data)
             total_chunks += len(data)
-            # Append new documents instead of replacing
             if not any(doc["name"] == file.name for doc in uploaded_documents):
                 uploaded_documents.append({"name": file.name, "selected": True})
                 logging.info(f"Added new document to uploaded_documents: {file.name}")
@@ -100,22 +116,68 @@ def update_vectors(files, parser):
     
     logging.info(f"Total chunks processed: {total_chunks}")
     
-    if os.path.exists("faiss_database"):
-        logging.info("Updating existing FAISS database")
-        database = FAISS.load_local("faiss_database", embed, allow_dangerous_deserialization=True)
-        database.add_documents(all_data)
+    if not all_data:
+        logging.warning("No valid data extracted from uploaded files")
+        return "No valid data could be extracted from the uploaded files. Please check the file contents and try again.", display_documents()
+    
+    try:
+        if os.path.exists("faiss_database"):
+            logging.info("Updating existing FAISS database")
+            database = FAISS.load_local("faiss_database", embed, allow_dangerous_deserialization=True)
+            database.add_documents(all_data)
+        else:
+            logging.info("Creating new FAISS database")
+            database = FAISS.from_documents(all_data, embed)
+        
+        database.save_local("faiss_database")
+        logging.info("FAISS database saved")
+    except Exception as e:
+        logging.error(f"Error updating FAISS database: {str(e)}")
+        return f"Error updating vector store: {str(e)}", display_documents()
+
+    # Save the updated list of documents
+    save_documents(uploaded_documents)
+
+    return f"Vector store updated successfully. Processed {total_chunks} chunks from {len(files)} files using {parser}.", display_documents()
+
+def delete_documents(selected_docs):
+    global uploaded_documents
+    
+    if not selected_docs:
+        return "No documents selected for deletion.", display_documents()
+    
+    embed = get_embeddings()
+    database = FAISS.load_local("faiss_database", embed, allow_dangerous_deserialization=True)
+    
+    deleted_docs = []
+    docs_to_keep = []
+    for doc in database.docstore._dict.values():
+        if doc.metadata.get("source") not in selected_docs:
+            docs_to_keep.append(doc)
+        else:
+            deleted_docs.append(doc.metadata.get("source", "Unknown"))
+    
+    # Print debugging information
+    logging.info(f"Total documents before deletion: {len(database.docstore._dict)}")
+    logging.info(f"Documents to keep: {len(docs_to_keep)}")
+    logging.info(f"Documents to delete: {len(deleted_docs)}")
+    
+    if not docs_to_keep:
+        # If all documents are deleted, remove the FAISS database directory
+        if os.path.exists("faiss_database"):
+            shutil.rmtree("faiss_database")
+        logging.info("All documents deleted. Removed FAISS database directory.")
     else:
-        logging.info("Creating new FAISS database")
-        database = FAISS.from_documents(all_data, embed)
+        # Create new FAISS index with remaining documents
+        new_database = FAISS.from_documents(docs_to_keep, embed)
+        new_database.save_local("faiss_database")
+        logging.info(f"Created new FAISS index with {len(docs_to_keep)} documents.")
     
-    database.save_local("faiss_database")
-    logging.info("FAISS database saved")
+    # Update uploaded_documents list
+    uploaded_documents = [doc for doc in uploaded_documents if doc["name"] not in deleted_docs]
+    save_documents(uploaded_documents)
     
-    return f"Vector store updated successfully. Processed {total_chunks} chunks from {len(files)} files using {parser}.", gr.CheckboxGroup(
-        choices=[doc["name"] for doc in uploaded_documents],
-        value=[doc["name"] for doc in uploaded_documents if doc["selected"]],
-        label="Select documents to query"
-    )
+    return f"Deleted documents: {', '.join(deleted_docs)}", display_documents()
 
 def generate_chunked_response(prompt, model, max_tokens=10000, num_calls=3, temperature=0.2, should_stop=False):
     print(f"Starting generate_chunked_response with {num_calls} calls")
@@ -473,8 +535,23 @@ def display_documents():
     return gr.CheckboxGroup(
         choices=[doc["name"] for doc in uploaded_documents],
         value=[doc["name"] for doc in uploaded_documents if doc["selected"]],
-        label="Select documents to query"
+        label="Select documents to query or delete"
     )
+
+def initial_conversation():
+    return [
+        (None, "Welcome! I'm your AI assistant for web search and PDF analysis. Here's how you can use me:\n\n"
+                "1. Set the toggle for Web Search and PDF Search from the checkbox in Additional Inputs drop down window\n"
+                "2. Use web search to find information\n"
+                "3. Upload the documents and ask questions about uploaded PDF documents by selecting your respective document\n"
+                "4. For any queries feel free to reach out @desai.shreyas94@gmail.com or discord - shreyas094\n\n"
+                "To get started, upload some PDFs or ask me a question!")
+    ]
+# Add this new function
+def refresh_documents():
+    global uploaded_documents
+    uploaded_documents = load_documents()
+    return display_documents()
 
 # Define the checkbox outside the demo block
 document_selector = gr.CheckboxGroup(label="Select documents to query")
@@ -526,23 +603,36 @@ demo = gr.ChatInterface(
     likeable=True,
     layout="bubble",
     height=400,
+    value=initial_conversation()
 )
 )
 
 # Add file upload functionality
 with demo:
-    gr.Markdown("## Upload PDF Documents")
+    gr.Markdown("## Upload and Manage PDF Documents")
 
     with gr.Row():
         file_input = gr.Files(label="Upload your PDF documents", file_types=[".pdf"])
         parser_dropdown = gr.Dropdown(choices=["pypdf", "llamaparse"], label="Select PDF Parser", value="llamaparse")
         update_button = gr.Button("Upload Document")
+        refresh_button = gr.Button("Refresh Document List")
     
     update_output = gr.Textbox(label="Update Status")
+    delete_button = gr.Button("Delete Selected Documents")
     
     # Update both the output text and the document selector
     update_button.click(update_vectors, 
                         inputs=[file_input, parser_dropdown], 
+                        outputs=[update_output, document_selector])
+    
+    # Add the refresh button functionality
+    refresh_button.click(refresh_documents, 
+                         inputs=[], 
+                         outputs=[document_selector])
+    
+    # Add the delete button functionality
+    delete_button.click(delete_documents,
+                        inputs=[document_selector],
                         outputs=[update_output, document_selector])
 
     gr.Markdown(
