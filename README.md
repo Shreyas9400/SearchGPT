@@ -10,6 +10,7 @@ This project combines the power of large language models with web search capabil
 * **Customizable Responses**: Adjust temperature and API call settings for fine-tuned outputs.
 * **User-friendly Interface**: Built with Gradio for an intuitive chat experience.
 * **Document Selection**: Choose which uploaded documents to include in your queries.
+* **Document Management**: Allows uploading, deleting, and refreshing document lists. Persistent storage of uploaded documents using JSON
 
 ## How It Works
 
@@ -31,6 +32,10 @@ This project combines the power of large language models with web search capabil
 5. **User Interaction**:
    - Users can chat with the AI, asking questions about uploaded documents or general queries.
    - The interface allows for adjusting model parameters and switching between PDF and web search modes.
+
+6. **Document Management**:
+   - The application maintains a list of uploaded documents in a JSON file (uploaded_documents.json).
+   - It provides functions to update, delete, and refresh the document list. 
 
 ## Setup and Usage
 
@@ -61,3 +66,7 @@ The project supports multiple AI models, including:
 ## Contribution
 
 Contributions to this project are welcome! Please feel free to submit issues or pull requests on the project's GitHub repository.
+
+## Contact
+
+For any queries feel free to reach out @desai.shreyas94@gmail.com or discord - shreyas094
