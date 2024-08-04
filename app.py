@@ -8,6 +8,8 @@ from typing import List
 from pydantic import BaseModel, Field
 from tempfile import NamedTemporaryFile
 from langchain_community.vectorstores import FAISS
+from langchain_core.vectorstores import VectorStore
+from langchain_core.documents import Document
 from langchain_community.document_loaders import PyPDFLoader
 from langchain_community.embeddings import HuggingFaceEmbeddings
 from llama_parse import LlamaParse
@@ -323,7 +325,7 @@ def respond(message, history, model, temperature, num_calls, use_web_search, sel
             embed = get_embeddings()
             if os.path.exists("faiss_database"):
                 database = FAISS.load_local("faiss_database", embed, allow_dangerous_deserialization=True)
-                retriever = database.as_retriever()
+                retriever = database.as_retriever(search_kwargs={"k": 20})
                 
                 # Filter relevant documents based on user selection
                 all_relevant_docs = retriever.get_relevant_documents(message)
@@ -460,25 +462,32 @@ def get_response_from_pdf(query, model, selected_docs, num_calls=3, temperature=
         yield "No documents available. Please upload PDF documents to answer questions."
         return
 
-    retriever = database.as_retriever()
-    logging.info(f"Retrieving relevant documents for query: {query}")
-    relevant_docs = retriever.get_relevant_documents(query)
-    logging.info(f"Number of relevant documents retrieved: {len(relevant_docs)}")
+    # Pre-filter the documents
+    filtered_docs = []
+    for doc_id, doc in database.docstore._dict.items():
+        if isinstance(doc, Document) and doc.metadata.get("source") in selected_docs:
+            filtered_docs.append(doc)
     
-    # Filter relevant_docs based on selected documents
-    filtered_docs = [doc for doc in relevant_docs if doc.metadata["source"] in selected_docs]
-    logging.info(f"Number of filtered documents: {len(filtered_docs)}")
-    
+    logging.info(f"Number of documents after pre-filtering: {len(filtered_docs)}")
+
     if not filtered_docs:
-        logging.warning(f"No relevant information found in the selected documents: {selected_docs}")
+        logging.warning(f"No documents found for the selected sources: {selected_docs}")
         yield "No relevant information found in the selected documents. Please try selecting different documents or rephrasing your query."
         return
 
-    for doc in filtered_docs:
+    # Create a new FAISS index with only the selected documents
+    filtered_db = FAISS.from_documents(filtered_docs, embed)
+    
+    retriever = filtered_db.as_retriever(search_kwargs={"k": 10})
+    logging.info(f"Retrieving relevant documents for query: {query}")
+    relevant_docs = retriever.get_relevant_documents(query)
+    logging.info(f"Number of relevant documents retrieved: {len(relevant_docs)}")
+
+    for doc in relevant_docs:
         logging.info(f"Document source: {doc.metadata['source']}")
         logging.info(f"Document content preview: {doc.page_content[:100]}...")  # Log first 100 characters of each document
 
-    context_str = "\n".join([doc.page_content for doc in filtered_docs])
+    context_str = "\n".join([doc.page_content for doc in relevant_docs])
     logging.info(f"Total context length: {len(context_str)}")
 
     if model == "@cf/meta/llama-3.1-8b-instruct":
