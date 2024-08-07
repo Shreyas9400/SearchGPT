@@ -1,6 +1,6 @@
 # AI-powered Web Search and PDF Chat Assistant
 
-This project combines the power of large language models with web search capabilities and PDF document analysis to create a versatile chat assistant. Users can interact with their uploaded PDF documents or leverage web search to get informative responses to their queries.
+This project combines the power of large language models with web search capabilities and PDF document analysis to create a versatile chat assistant. Users can interact with their uploaded PDF documents or leverage web search to get informative responses to their queries. Product available for testing here: https://shreyas094-searchgpt.hf.space
 
 ## Features
 
