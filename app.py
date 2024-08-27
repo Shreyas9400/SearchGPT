@@ -4,7 +4,7 @@ import re
 import gradio as gr
 import requests
 from duckduckgo_search import DDGS
-from typing import List
+from typing import List, Dict
 from pydantic import BaseModel, Field
 from tempfile import NamedTemporaryFile
 from langchain_community.vectorstores import FAISS
@@ -13,7 +13,6 @@ from langchain_core.documents import Document
 from langchain_community.document_loaders import PyPDFLoader
 from langchain_community.embeddings import HuggingFaceEmbeddings
 from llama_parse import LlamaParse
-from langchain_core.documents import Document
 from huggingface_hub import InferenceClient
 import inspect
 import logging
@@ -37,7 +36,12 @@ MODELS = [
     "mistralai/Mistral-7B-Instruct-v0.3",
     "mistralai/Mixtral-8x7B-Instruct-v0.1",
     "@cf/meta/llama-3.1-8b-instruct",
-    "mistralai/Mistral-Nemo-Instruct-2407"
+    "mistralai/Mistral-Nemo-Instruct-2407",
+    "meta-llama/Meta-Llama-3.1-8B-Instruct",
+    "duckduckgo/gpt-4o-mini",
+    "duckduckgo/claude-3-haiku",
+    "duckduckgo/llama-3.1-70b",
+    "duckduckgo/mixtral-8x7b"
 ]
 
 # Initialize LlamaParse
@@ -67,7 +71,7 @@ def load_document(file: NamedTemporaryFile, parser: str = "llamaparse") -> List[
         raise ValueError("Invalid parser specified. Use 'pypdf' or 'llamaparse'.")
 
 def get_embeddings():
-    return HuggingFaceEmbeddings(model_name="sentence-transformers/stsb-roberta-large")
+    return HuggingFaceEmbeddings(model_name="avsolatorio/GIST-Embedding-v0")
 
 # Add this at the beginning of your script, after imports
 DOCUMENTS_FILE = "uploaded_documents.json"
@@ -140,7 +144,9 @@ def update_vectors(files, parser):
     # Save the updated list of documents
     save_documents(uploaded_documents)
 
+    # Return a tuple with the status message and the updated document list
     return f"Vector store updated successfully. Processed {total_chunks} chunks from {len(files)} files using {parser}.", display_documents()
+
 
 def delete_documents(selected_docs):
     global uploaded_documents
@@ -271,24 +277,14 @@ def generate_chunked_response(prompt, model, max_tokens=10000, num_calls=3, temp
     print(f"Final clean response: {final_response[:100]}...")
     return final_response
 
-def duckduckgo_search(query):
-    with DDGS() as ddgs:
-        results = ddgs.text(query, max_results=5)
-    return results
-
-class CitingSources(BaseModel):
-    sources: List[str] = Field(
-        ...,
-        description="List of sources to cite. Should be an URL of the source."
-    )
-def chatbot_interface(message, history, use_web_search, model, temperature, num_calls):
+def chatbot_interface(message, history, model, temperature, num_calls):
     if not message.strip():
         return "", history
 
     history = history + [(message, "")]
 
     try:
-        for response in respond(message, history, model, temperature, num_calls, use_web_search):
+        for response in respond(message, history, model, temperature, num_calls):
             history[-1] = (message, response)
             yield history
     except gr.CancelledError:
@@ -298,70 +294,180 @@ def chatbot_interface(message, history, use_web_search, model, temperature, num_
         history[-1] = (message, f"An unexpected error occurred: {str(e)}")
         yield history
 
-def retry_last_response(history, use_web_search, model, temperature, num_calls):
+def retry_last_response(history, model, temperature, num_calls):
     if not history:
         return history
     
     last_user_msg = history[-1][0]
     history = history[:-1]  # Remove the last response
     
-    return chatbot_interface(last_user_msg, history, use_web_search, model, temperature, num_calls)
+    return chatbot_interface(last_user_msg, history, model, temperature, num_calls)
 
+def truncate_context(context, max_length=16000):
+    """Truncate the context to a maximum length."""
+    if len(context) <= max_length:
+        return context
+    return context[:max_length] + "..."
+
+def get_response_from_duckduckgo(query, model, context, num_calls=1, temperature=0.2):
+    logging.info(f"Using DuckDuckGo chat with model: {model}")
+    ddg_model = model.split('/')[-1]  # Extract the model name from the full string
+    
+    # Truncate the context to avoid exceeding input limits
+    truncated_context = truncate_context(context)
+    
+    full_response = ""
+    for _ in range(num_calls):
+        try:
+            # Include truncated context in the query
+            contextualized_query = f"Using the following context:\n{truncated_context}\n\nUser question: {query}"
+            results = DDGS().chat(contextualized_query, model=ddg_model)
+            full_response += results + "\n"
+            logging.info(f"DuckDuckGo API response received. Length: {len(results)}")
+        except Exception as e:
+            logging.error(f"Error in generating response from DuckDuckGo: {str(e)}")
+            yield f"An error occurred with the {model} model: {str(e)}. Please try again."
+            return
+
+    yield full_response.strip()
+
+class ConversationManager:
+    def __init__(self):
+        self.history = []
+        self.current_context = None
+
+    def add_interaction(self, query, response):
+        self.history.append((query, response))
+        self.current_context = f"Previous query: {query}\nPrevious response summary: {response[:200]}..."
+
+    def get_context(self):
+        return self.current_context
+
+conversation_manager = ConversationManager()
+
+def get_web_search_results(query: str, max_results: int = 10) -> List[Dict[str, str]]:
+    try:
+        results = list(DDGS().text(query, max_results=max_results))
+        if not results:
+            print(f"No results found for query: {query}")
+        return results
+    except Exception as e:
+        print(f"An error occurred during web search: {str(e)}")
+        return [{"error": f"An error occurred during web search: {str(e)}"}]
+
+def rephrase_query(original_query: str, conversation_manager: ConversationManager) -> str:
+    context = conversation_manager.get_context()
+    if context:
+        prompt = f"""You are a highly intelligent conversational chatbot. Your task is to analyze the given context and new query, then decide whether to rephrase the query with or without incorporating the context. Follow these steps:
+
+        1. Determine if the new query is a continuation of the previous conversation or an entirely new topic.
+        2. If it's a continuation, rephrase the query by incorporating relevant information from the context to make it more specific and contextual.
+        3. If it's a new topic, rephrase the query to make it more appropriate for a web search, focusing on clarity and accuracy without using the previous context.
+        4. Provide ONLY the rephrased query without any additional explanation or reasoning.
+        
+        Context: {context}
+        
+        New query: {original_query}
+        
+        Rephrased query:"""
+        response = DDGS().chat(prompt, model="llama-3.1-70b")
+        rephrased_query = response.split('\n')[0].strip()
+        return rephrased_query
+    return original_query
+
+def summarize_web_results(query: str, search_results: List[Dict[str, str]], conversation_manager: ConversationManager) -> str:
+    try:
+        context = conversation_manager.get_context()
+        search_context = "\n\n".join([f"Title: {result['title']}\nContent: {result['body']}" for result in search_results])
+
+        prompt = f"""You are a highly intelligent & expert analyst and your job is to skillfully articulate the web search results about '{query}' and considering the context: {context}, 
+        You have to create a comprehensive news summary FOCUSING on the context provided to you. 
+        Include key facts, relevant statistics, and expert opinions if available. 
+        Ensure the article is well-structured with an introduction, main body, and conclusion, IF NECESSARY. 
+        Address the query in the context of the ongoing conversation IF APPLICABLE.
+        Cite sources directly within the generated text and not at the end of the generated text, integrating URLs where appropriate to support the information provided:
+
+        {search_context}
+
+        Article:"""
+
+        summary = DDGS().chat(prompt, model="llama-3.1-70b")
+        return summary
+    except Exception as e:
+        return f"An error occurred during summarization: {str(e)}"
+
+# Modify the existing respond function to handle both PDF and web search
 def respond(message, history, model, temperature, num_calls, use_web_search, selected_docs):
     logging.info(f"User Query: {message}")
     logging.info(f"Model Used: {model}")
-    logging.info(f"Search Type: {'Web Search' if use_web_search else 'PDF Search'}")
-
     logging.info(f"Selected Documents: {selected_docs}")
+    logging.info(f"Use Web Search: {use_web_search}")
 
-    try:
-        if use_web_search:
-            for main_content, sources in get_response_with_search(message, model, num_calls=num_calls, temperature=temperature):
-                response = f"{main_content}\n\n{sources}"
-                first_line = response.split('\n')[0] if response else ''
-#                logging.info(f"Generated Response (first line): {first_line}")
-                yield response
+    if use_web_search:
+        original_query = message
+        rephrased_query = rephrase_query(message, conversation_manager)
+        logging.info(f"Original query: {original_query}")
+        logging.info(f"Rephrased query: {rephrased_query}")
+
+        final_summary = ""
+        for _ in range(num_calls):
+            search_results = get_web_search_results(rephrased_query)
+            if not search_results:
+                final_summary += f"No search results found for the query: {rephrased_query}\n\n"
+            elif "error" in search_results[0]:
+                final_summary += search_results[0]["error"] + "\n\n"
+            else:
+                summary = summarize_web_results(rephrased_query, search_results, conversation_manager)
+                final_summary += summary + "\n\n"
+
+        if final_summary:
+            conversation_manager.add_interaction(original_query, final_summary)
+            yield final_summary
         else:
+            yield "Unable to generate a response. Please try a different query."
+    else:
+        # Existing PDF search logic
+        try:
             embed = get_embeddings()
             if os.path.exists("faiss_database"):
                 database = FAISS.load_local("faiss_database", embed, allow_dangerous_deserialization=True)
                 retriever = database.as_retriever(search_kwargs={"k": 20})
                 
-                # Filter relevant documents based on user selection
                 all_relevant_docs = retriever.get_relevant_documents(message)
                 relevant_docs = [doc for doc in all_relevant_docs if doc.metadata["source"] in selected_docs]
                 
                 if not relevant_docs:
                     yield "No relevant information found in the selected documents. Please try selecting different documents or rephrasing your query."
                     return
-
+    
                 context_str = "\n".join([doc.page_content for doc in relevant_docs])
+                logging.info(f"Context length: {len(context_str)}")
             else:
                 context_str = "No documents available."
                 yield "No documents available. Please upload PDF documents to answer questions."
                 return
             
-            if model == "@cf/meta/llama-3.1-8b-instruct":
+            if model.startswith("duckduckgo/"):
+                # Use DuckDuckGo chat with context
+                for partial_response in get_response_from_duckduckgo(message, model, context_str, num_calls, temperature):
+                    yield partial_response
+            elif model == "@cf/meta/llama-3.1-8b-instruct":
                 # Use Cloudflare API
                 for partial_response in get_response_from_cloudflare(prompt="", context=context_str, query=message, num_calls=num_calls, temperature=temperature, search_type="pdf"):
-                    first_line = partial_response.split('\n')[0] if partial_response else ''
-#                   logging.info(f"Generated Response (first line): {first_line}")
                     yield partial_response
             else:
                 # Use Hugging Face API
                 for partial_response in get_response_from_pdf(message, model, selected_docs, num_calls=num_calls, temperature=temperature):
-                    first_line = partial_response.split('\n')[0] if partial_response else ''
-#                    logging.info(f"Generated Response (first line): {first_line}")
                     yield partial_response
-    except Exception as e:
-        logging.error(f"Error with {model}: {str(e)}")
-        if "microsoft/Phi-3-mini-4k-instruct" in model:
-            logging.info("Falling back to Mistral model due to Phi-3 error")
-            fallback_model = "mistralai/Mistral-7B-Instruct-v0.3"
-            yield from respond(message, history, fallback_model, temperature, num_calls, use_web_search, selected_docs)
-        else:
-            yield f"An error occurred with the {model} model: {str(e)}. Please try again or select a different model."
-
+        except Exception as e:
+            logging.error(f"Error with {model}: {str(e)}")
+            if "microsoft/Phi-3-mini-4k-instruct" in model:
+                logging.info("Falling back to Mistral model due to Phi-3 error")
+                fallback_model = "mistralai/Mistral-7B-Instruct-v0.3"
+                yield from respond(message, history, fallback_model, temperature, num_calls, selected_docs)
+            else:
+                yield f"An error occurred with the {model} model: {str(e)}. Please try again or select a different model."
+        
 logging.basicConfig(level=logging.DEBUG)
 
 def get_response_from_cloudflare(prompt, context, query, num_calls=3, temperature=0.2, search_type="pdf"):
@@ -419,36 +525,16 @@ After writing the document, please provide a list of sources used in your respon
     if not full_response:
         yield "I apologize, but I couldn't generate a response at this time. Please try again later."
 
-def get_response_with_search(query, model, num_calls=3, temperature=0.2):
-    search_results = duckduckgo_search(query)
-    context = "\n".join(f"{result['title']}\n{result['body']}\nSource: {result['href']}\n" 
-                        for result in search_results if 'body' in result)
+def create_web_search_vectors(search_results):
+    embed = get_embeddings()
     
-    prompt = f"""Using the following context:
-{context}
-Write a detailed and complete research document that fulfills the following user request: '{query}'
-After writing the document, please provide a list of sources used in your response."""
-
-    if model == "@cf/meta/llama-3.1-8b-instruct":
-        # Use Cloudflare API
-        for response in get_response_from_cloudflare(prompt="", context=context, query=query, num_calls=num_calls, temperature=temperature, search_type="web"):
-            yield response, ""  # Yield streaming response without sources
-    else:
-        # Use Hugging Face API
-        client = InferenceClient(model, token=huggingface_token)
-        
-        main_content = ""
-        for i in range(num_calls):
-            for message in client.chat_completion(
-                messages=[{"role": "user", "content": prompt}],
-                max_tokens=10000,
-                temperature=temperature,
-                stream=True,
-            ):
-                if message.choices and message.choices[0].delta and message.choices[0].delta.content:
-                    chunk = message.choices[0].delta.content
-                    main_content += chunk
-                    yield main_content, ""  # Yield partial main content without sources
+    documents = []
+    for result in search_results:
+        if 'body' in result:
+            content = f"{result['title']}\n{result['body']}\nSource: {result['href']}"
+            documents.append(Document(page_content=content, metadata={"source": result['href']}))
+    
+    return FAISS.from_documents(documents, embed)
 
 def get_response_from_pdf(query, model, selected_docs, num_calls=3, temperature=0.2):
     logging.info(f"Entering get_response_from_pdf with query: {query}, model: {model}, selected_docs: {selected_docs}")
@@ -509,7 +595,7 @@ Write a detailed and complete response that answers the following user question:
             logging.info(f"API call {i+1}/{num_calls}")
             for message in client.chat_completion(
                 messages=[{"role": "user", "content": prompt}],
-                max_tokens=10000,
+                max_tokens=20000,
                 temperature=temperature,
                 stream=True,
             ):
@@ -565,21 +651,24 @@ def refresh_documents():
 # Define the checkbox outside the demo block
 document_selector = gr.CheckboxGroup(label="Select documents to query")
 
-use_web_search = gr.Checkbox(label="Use Web Search", value=True)
+use_web_search = gr.Checkbox(label="Use Web Search", value=False)
 
 custom_placeholder = "Ask a question (Note: You can toggle between Web Search and PDF Chat in Additional Inputs below)"
 
+# Update the demo interface
+# Update the Gradio interface
 demo = gr.ChatInterface(
     respond,
+    additional_inputs_accordion=gr.Accordion(label="⚙️ Parameters", open=True, render=False),
     additional_inputs=[
         gr.Dropdown(choices=MODELS, label="Select Model", value=MODELS[3]),
         gr.Slider(minimum=0.1, maximum=1.0, value=0.2, step=0.1, label="Temperature"),
         gr.Slider(minimum=1, maximum=5, value=1, step=1, label="Number of API Calls"),
-        use_web_search,
-        document_selector
+        gr.Checkbox(label="Use Web Search", value=True),
+        gr.CheckboxGroup(label="Select documents to query")        
     ],
-    title="AI-powered Web Search and PDF Chat Assistant",
-    description="Chat with your PDFs or use web search to answer questions. Toggle between Web Search and PDF Chat in Additional Inputs below.",
+    title="AI-powered PDF Chat and Web Search Assistant",
+    description="Chat with your PDFs or use web search to answer questions.",
     theme=gr.themes.Soft(
         primary_hue="orange",
         secondary_hue="amber",
@@ -602,24 +691,25 @@ demo = gr.ChatInterface(
     examples=[
         ["Tell me about the contents of the uploaded PDFs."],
         ["What are the main topics discussed in the documents?"],
-        ["Can you summarize the key points from the PDFs?"]
+        ["Can you summarize the key points from the PDFs?"],
+        ["What's the latest news about artificial intelligence?"]
     ],
     cache_examples=False,
     analytics_enabled=False,
-    textbox=gr.Textbox(placeholder=custom_placeholder, container=False, scale=7),
+    textbox=gr.Textbox(placeholder="Ask a question about the uploaded PDFs or any topic", container=False, scale=7),
     chatbot = gr.Chatbot(  
-    show_copy_button=True,
-    likeable=True,
-    layout="bubble",
-    height=400,
-    value=initial_conversation()
-)
+        show_copy_button=True,
+        likeable=True,
+        layout="bubble",
+        height=400,
+        value=initial_conversation()
+    )
 )
 
 # Add file upload functionality
+# Add file upload functionality
 with demo:
     gr.Markdown("## Upload and Manage PDF Documents")
-
     with gr.Row():
         file_input = gr.Files(label="Upload your PDF documents", file_types=[".pdf"])
         parser_dropdown = gr.Dropdown(choices=["pypdf", "llamaparse"], label="Select PDF Parser", value="llamaparse")
@@ -630,19 +720,25 @@ with demo:
     delete_button = gr.Button("Delete Selected Documents")
     
     # Update both the output text and the document selector
-    update_button.click(update_vectors, 
-                        inputs=[file_input, parser_dropdown], 
-                        outputs=[update_output, document_selector])
+    update_button.click(
+        update_vectors, 
+        inputs=[file_input, parser_dropdown], 
+        outputs=[update_output, demo.additional_inputs[-1]]  # Use the CheckboxGroup from additional_inputs
+    )
     
     # Add the refresh button functionality
-    refresh_button.click(refresh_documents, 
-                         inputs=[], 
-                         outputs=[document_selector])
+    refresh_button.click(
+        refresh_documents, 
+        inputs=[], 
+        outputs=[demo.additional_inputs[-1]]  # Use the CheckboxGroup from additional_inputs
+    )
     
     # Add the delete button functionality
-    delete_button.click(delete_documents,
-                        inputs=[document_selector],
-                        outputs=[update_output, document_selector])
+    delete_button.click(
+        delete_documents,
+        inputs=[demo.additional_inputs[-1]],  # Use the CheckboxGroup from additional_inputs
+        outputs=[update_output, demo.additional_inputs[-1]]
+    )
 
     gr.Markdown(
     """
