@@ -1,3 +1,21 @@
+1. Clone the repository: git clone https://github.com/Shreyas9400/SearchGPT.git
+cd SearchGPT
+
+2. Create a virtual environment: python -m venv venv
+source venv/bin/activate  # On Windows, use venv\Scripts\activate
+
+3. Install the required packages: pip install -r requirements.txt
+
+4. Set up environment variables:
+Create a `.env` file in the project root and add the following:
+HUGGINGFACE_TOKEN=your_huggingface_token
+LLAMA_CLOUD_API_KEY=your_llama_cloud_api_key
+CLOUDFARE_ACCOUNT_ID=your_cloudflare_account_id
+CLOUDFLARE_AUTH_TOKEN=your_cloudflare_auth_token
+
+5. Run the application: python main.py
+
+
 # AI-powered Web Search and PDF Chat Assistant
 
 This project combines the power of large language models with web search capabilities and PDF document analysis to create a versatile chat assistant. Users can interact with their uploaded PDF documents or leverage web search to get informative responses to their queries. Product available for testing here: https://shreyas094-searchgpt.hf.space
@@ -70,3 +88,6 @@ Contributions to this project are welcome! Please feel free to submit issues or 
 ## Contact
 
 For any queries feel free to reach out @desai.shreyas94@gmail.com or discord - shreyas094
+
+
+
