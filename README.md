@@ -13,6 +13,12 @@ LLAMA_CLOUD_API_KEY=your_llama_cloud_api_key
 CLOUDFARE_ACCOUNT_ID=your_cloudflare_account_id
 CLOUDFLARE_AUTH_TOKEN=your_cloudflare_auth_token
 
+Steps for creating Hugging Face Token>> Register on Hugging Face: https://huggingface.co/ >> Click on Settings >> Access Tokens: https://huggingface.co/settings/tokens >> Create a Read only API key
+
+Steps for creating LLAMA CLOUD API KEY>> First, login and get an api-key from https://cloud.llamaindex.ai >> Click on API Key >> Click on Generate New Key.
+
+Steps for creating CLOUDFARE ACCOUNT ID and Token >> Register yourself here https://dash.cloudflare.com/>> Go on this link https://dash.cloudflare.com/a17f03e0f049ccae0c15cdcf3b9737ce/ai/workers-ai/api-quick-start >> Click on "Create Workers AI API Token" >> Account ID will be just below Get Account ID
+
 5. Run the application: python main.py
 
 
