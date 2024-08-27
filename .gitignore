@@ -1,0 +1,5 @@
+__pycache__/
+*.pyc
+.env
+faiss_database/
+uploaded_documents.json
